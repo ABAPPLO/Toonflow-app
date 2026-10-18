@@ -277,9 +277,11 @@ function exportVideo(aspect: number) {
   return exportToCanvas("video", "video", aspect, signal => renderVideo(scene.value, plan, aspect, signal, value => { exportProgress.value = value; }, lighting.value, sceneSettings.value));
 }
 
-function exportImage(anchor: CameraAnchor, aspect: number, time: number) {
-  const name = `关键帧${anchors.value.findIndex(item => item.id === anchor.id) + 1}`;
-  return exportToCanvas("image", anchor.id, aspect, async signal => {
+function exportImage(anchor: CameraAnchor | undefined, aspect: number, time: number) {
+  const name = (anchor
+    ? `关键帧${anchors.value.findIndex(item => item.id === anchor.id) + 1}`
+    : `${selectedPlan.value?.name ?? "画面"}-${time.toFixed(1)}s`).replace(/[\\/:*?"<>|]/g, "-");
+  return exportToCanvas("image", anchor?.id ?? `time-${time}`, aspect, async signal => {
     const file = await renderImage(scene.value, anchor, aspect, time, signal, selectedPlan.value, lighting.value, sceneSettings.value);
     return new File([file], `${name}.png`, { type: file.type });
   });
@@ -430,7 +432,7 @@ nodeTools.register({
 
 nodeTools.register({
   name: "exportVideo",
-  description: "把当前选中的动画方案实时录制为 MP4 并在画布旁生成视频节点，等价于点击“导出视频节点”按钮。本地渲染不调用媒体模型，耗时约等于动画时长且期间窗口须保持可见。立即返回 exporting，用 getGenerationStatus 查询 exportProgress 与完成状态",
+  description: "把当前选中的动画方案离线逐帧编码为 MP4 并在画布旁生成视频节点，等价于点击“导出视频节点”按钮。本地渲染不调用媒体模型，页面保持打开即可、可在后台标签；总耗时约等于帧数乘单帧渲染耗时，与动画时长无关。仅在不支持离线编码的旧浏览器回退为实时录制时才要求窗口保持可见。立即返回 exporting，用 getGenerationStatus 查询 exportProgress 与完成状态",
   parameters: z.strictObject({ aspect: z.number().positive().max(4).optional() }),
   execute(args, { signal }) {
     signal?.throwIfAborted();
@@ -444,7 +446,7 @@ nodeTools.register({
 
 nodeTools.register({
   name: "exportImage",
-  description: "把取景关键帧渲染为 PNG 并在画布旁生成图片节点，等价于点击关键帧上的导出按钮。anchorId 缺省导出第一个关键帧，可用 id 见 getGenerationStatus 返回的 anchors。立即返回 exporting，用 getGenerationStatus 查询完成状态",
+  description: "渲染指定画面为 PNG 并在画布旁生成图片节点，等价于点击关键帧上的导出按钮。anchorId 缺省导出第一个取景关键帧；没有关键帧时不报错，按 time（方案时间轴上的秒数，默认 0）用选中方案的运镜画面导出。可用关键帧见 getGenerationStatus 返回的 anchors。立即返回 exporting，用 getGenerationStatus 查询完成状态",
   parameters: z.strictObject({
     anchorId: z.string().min(1).max(100).optional(),
     aspect: z.number().positive().max(4).optional(),
@@ -453,13 +455,13 @@ nodeTools.register({
   execute(args, { signal }) {
     signal?.throwIfAborted();
     const anchor = args.anchorId ? anchors.value.find(item => item.id === args.anchorId) : anchors.value[0];
-    if (!anchor) {
-      if (!anchors.value.length) throw new Error("没有取景关键帧，请先在面板创建");
+    if (args.anchorId && !anchor) {
+      if (!anchors.value.length) throw new Error("没有取景关键帧，可省略 anchorId 按 time 导出方案画面");
       throw new Error(`关键帧不存在，可用关键帧：${anchors.value.map(item => item.id).join("、")}`);
     }
     if (!nodeTypes?.value?.["remote-imageNode"]) throw new Error("请先启用图片节点插件");
     if (exportingImage.value) throw new Error("图片正在导出，请等待完成");
-    void exportImage(anchor, args.aspect ?? 16 / 9, args.time ?? anchor.time ?? 0);
+    void exportImage(anchor, args.aspect ?? 16 / 9, args.time ?? anchor?.time ?? 0);
     return { status: "exporting" };
   },
 });
