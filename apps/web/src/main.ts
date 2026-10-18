@@ -21,6 +21,17 @@ import { registerLanguage } from "@/lib/i18n";
 import { locale, translate } from "@toonflow/i18n/vue";
 
 const app = createApp(App);
+
+// HTTP 非本机访问属于非安全上下文，没有 crypto.randomUUID；初始化与连接 ID 依赖它，这里补一个等价实现。
+if (!crypto.randomUUID) {
+  const fallback = () => {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+    bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+    return [...bytes].map((byte, index) => (index === 4 || index === 6 || index === 8 || index === 10 ? "-" : "") + byte.toString(16).padStart(2, "0")).join("");
+  };
+  crypto.randomUUID = fallback as Crypto["randomUUID"];
+}
 app.onUnmount(registerLanguage());
 const requiresWebView2Update = isDesktop && /Windows/i.test(navigator.userAgent)
   && [Map.groupBy, URL.canParse, Promise.withResolvers].some(method => typeof method !== "function");
