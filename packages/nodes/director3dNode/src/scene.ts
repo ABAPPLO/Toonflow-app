@@ -1,6 +1,7 @@
 import { z } from "@toonflow/nodes-scaffold/runtime";
 import { createJsonScene, registerObject, type SceneRuntime } from "threejson/core";
-import { AmbientLight, Box3, DirectionalLight, GridHelper, HemisphereLight, Mesh, PCFSoftShadowMap, PlaneGeometry, ShadowMaterial, Sphere, Vector3 } from "three";
+import { ACESFilmicToneMapping, AmbientLight, Box3, DirectionalLight, GridHelper, HemisphereLight, Mesh, PCFSoftShadowMap, PMREMGenerator, PlaneGeometry, ShadowMaterial, Sphere, Vector3 } from "three";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import { Sky } from "three/examples/jsm/objects/Sky.js";
 import { createMannequin, mannequinJoints } from "./mannequin";
 
@@ -169,10 +170,10 @@ export function createEmptyScene(): SceneDocument {
   };
 }
 
-export async function createStage(canvas: HTMLCanvasElement, document: SceneDocument, beforeFrame?: () => void, aspect = 16 / 9, lighting?: LightingSettings, settings: SceneSettings = { gridVisible: true, skyVisible: true }) {
+export async function createStage(canvas: HTMLCanvasElement, document: SceneDocument, beforeFrame?: () => void, aspect = 16 / 9, lighting?: LightingSettings, settings: SceneSettings = { gridVisible: true, skyVisible: true }, baseWidth = 960) {
   document = sceneSchema.parse(document);
-  const width = Math.round(960 * Math.min(1, aspect) / 2) * 2;
-  const height = Math.round(960 / Math.max(1, aspect) / 2) * 2;
+  const width = Math.round(baseWidth * Math.min(1, aspect) / 2) * 2;
+  const height = Math.round(baseWidth / Math.max(1, aspect) / 2) * 2;
   let runtime: SceneRuntime | undefined;
   try {
     const next = await createJsonScene({
@@ -205,6 +206,14 @@ export async function createStage(canvas: HTMLCanvasElement, document: SceneDocu
     const { x, y, z } = document.sceneConfig.controls.target;
     next.camera.lookAt(x, y, z);
     next.camera.updateProjectionMatrix();
+    // 视觉质量基线：ACES 色调映射 + 环境光照 + 1:1 像素比，导出与预览共用。
+    next.renderer.setPixelRatio(1);
+    next.renderer.toneMapping = ACESFilmicToneMapping;
+    next.renderer.toneMappingExposure = 1.12;
+    const pmrem = new PMREMGenerator(next.renderer);
+    next.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    next.scene.environmentIntensity = 0.55;
+    pmrem.dispose();
     next.renderer.shadowMap.type = PCFSoftShadowMap;
     next.scene.traverse(object => {
       if (object instanceof Mesh) {
@@ -253,6 +262,7 @@ export function disposeStage(runtime: SceneRuntime) {
       child.material.dispose();
     }
   }
+  runtime.scene.environment?.dispose();
   runtime.dispose();
   runtime.renderer.forceContextLoss();
 }

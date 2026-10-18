@@ -12,7 +12,7 @@
     :plans="plans" :selectedPlanId="data.selectedPlanId ?? ''" :tasks="tasks"
     :exportingVideo="exportingVideo" :exportingImage="exportingImage" :exportProgress="exportProgress"
     @exportVideo="exportVideo" @exportImage="exportImage" @addMannequin="addMannequin"
-    @selectPlan="data.selectedPlanId = $event" @loadModels="loadModels" @generate="generate" @editInstruction="setPrompt" @close="editing = false">
+    @selectPlan="data.selectedPlanId = $event" @loadModels="loadModels" @generate="generate()" @editInstruction="setPrompt" @close="editing = false">
     <template #input>
       <referenceItem v-if="refList.length" v-model="refList" @preview="setReferencePreview" @remove="removeReference" />
       <promptInput v-model="promptModel" v-model:text="prompt" :references="referenceMentions" />
@@ -25,7 +25,7 @@ import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { useVueFlow } from "@vue-flow/core";
 import { IconCube3dSphere } from "@tabler/icons-vue";
 import { ElLoading, ElMessage } from "element-plus";
-import { nodeSkeleton, useNode, useNodeFiles, z, type NodeHandle, type NodeData, type NodeAiModel } from "@toonflow/nodes-scaffold/runtime";
+import { nodeSkeleton, nodeTools, useNode, useNodeFiles, z, type NodeHandle, type NodeData, type NodeAiModel } from "@toonflow/nodes-scaffold/runtime";
 import { useNodeReferences } from "@toonflow/node-shared/useNodeReferences";
 import promptInput from "@toonflow/node-shared/promptInput";
 import referenceItem from "@toonflow/node-shared/referenceItem";
@@ -56,6 +56,7 @@ const mediaFiles = useNodeFiles();
 const exportingVideo = ref(false);
 const exportingImage = ref("");
 const exportProgress = ref(0);
+const exportError = ref("");
 const exportController = new AbortController();
 nodeEvent.on("delete", () => { if (exportingVideo.value || exportingImage.value) throw new Error("正在导出，请完成后再删除导演节点"); });
 const data = computed(() => node.data as typeof node.data & {
@@ -203,6 +204,7 @@ async function exportToCanvas(kind: "image" | "video", key: string, aspect: numb
   if (!nodeTypes?.value?.[type]) return void ElMessage.error(`请先启用${kind === "image" ? "图片" : "视频"}节点插件`);
   if (kind === "video") { exportingVideo.value = true; exportProgress.value = 0; }
   else exportingImage.value = key;
+  exportError.value = "";
   const id = crypto.randomUUID();
   let exportNode: ReturnType<typeof findNode<NodeData & { exportProgress?: number }>>;
   let discarded = false;
@@ -251,7 +253,8 @@ async function exportToCanvas(kind: "image" | "video", key: string, aspect: numb
     if (kind === "video") exportProgress.value = 100;
     ElMessage.success(`${kind === "image" ? "图片" : "视频"}已导出到画布`);
   } catch (error) {
-    if (!disposed && !discarded) ElMessage.error(error instanceof Error ? error.message : "导出失败，请重试");
+    exportError.value = error instanceof Error ? error.message : "导出失败，请重试";
+    if (!disposed && !discarded) ElMessage.error(exportError.value);
     if (exportNode && findNode(id) === exportNode) removeNodes(id);
   } finally {
     stopWatching();
@@ -335,10 +338,9 @@ function setPrompt(value: string) {
   promptModel.value = value ? value.split("\n").map(text => [{ type: "Write", text }]) : [];
 }
 
-async function generate() {
+async function generate(requirement = prompt.value.trim()) {
   if (modelLoading.value || modelError.value || addingMannequin.value) return;
   const choice = selectedModel.value;
-  const requirement = prompt.value.trim();
   if (!choice || !requirement) return;
   // 首次创建基础模型期间只接收一个请求，后续动画可并行生成。
   if (!scene.value.objectList.length && tasks.value.some(task => !task.error)) return;
@@ -407,6 +409,82 @@ async function generate() {
     if (!disposed) tasks.value = tasks.value.map(item => item.id === task.id ? { ...item, error: error instanceof Error ? error.message : "生成失败，请重试" } : item);
   }
 }
+
+nodeTools.register({
+  name: "generate",
+  description: "按当前或传入的指令生成导演台动画方案，等价于点击面板的“生成方案”按钮。instruction 缺省时使用节点输入框当前提示词，两者均为空、模型未就绪或首次创建基础模型期间已有进行中任务时报错；生成会清空节点输入框。立即返回 generating，任务 id 留在 getGenerationStatus 的 generating 列表表示进行中，带 error 表示失败，从列表消失表示成功",
+  parameters: z.strictObject({ instruction: z.string().max(4000).optional() }),
+  execute(args, { signal }) {
+    signal?.throwIfAborted();
+    if (modelLoading.value) throw new Error("模型文件加载中，请稍后再生成");
+    if (modelError.value) throw new Error(`模型文件加载失败：${modelError.value}`);
+    if (addingMannequin.value) throw new Error("正在添加人偶，请稍后再生成");
+    if (!selectedModel.value) throw new Error("未选择生成模型，请先在面板选择模型");
+    const requirement = (args.instruction ?? prompt.value).trim();
+    if (!requirement) throw new Error("instruction 与节点输入框提示词均为空");
+    if (!scene.value.objectList.length && tasks.value.some(task => !task.error)) throw new Error("首次创建基础模型期间只接收一个生成任务，请等待完成");
+    void generate(requirement);
+    return { status: "generating" };
+  },
+});
+
+nodeTools.register({
+  name: "exportVideo",
+  description: "把当前选中的动画方案实时录制为 MP4 并在画布旁生成视频节点，等价于点击“导出视频节点”按钮。本地渲染不调用媒体模型，耗时约等于动画时长且期间窗口须保持可见。立即返回 exporting，用 getGenerationStatus 查询 exportProgress 与完成状态",
+  parameters: z.strictObject({ aspect: z.number().positive().max(4).optional() }),
+  execute(args, { signal }) {
+    signal?.throwIfAborted();
+    if (!selectedPlan.value) throw new Error("没有选中的动画方案，请先生成或选中方案");
+    if (!nodeTypes?.value?.["remote-videoNode"]) throw new Error("请先启用视频节点插件");
+    if (exportingVideo.value) throw new Error("视频正在导出，请等待完成");
+    void exportVideo(args.aspect ?? 16 / 9);
+    return { status: "exporting" };
+  },
+});
+
+nodeTools.register({
+  name: "exportImage",
+  description: "把取景关键帧渲染为 PNG 并在画布旁生成图片节点，等价于点击关键帧上的导出按钮。anchorId 缺省导出第一个关键帧，可用 id 见 getGenerationStatus 返回的 anchors。立即返回 exporting，用 getGenerationStatus 查询完成状态",
+  parameters: z.strictObject({
+    anchorId: z.string().min(1).max(100).optional(),
+    aspect: z.number().positive().max(4).optional(),
+    time: z.number().min(0).max(300).optional(),
+  }),
+  execute(args, { signal }) {
+    signal?.throwIfAborted();
+    const anchor = args.anchorId ? anchors.value.find(item => item.id === args.anchorId) : anchors.value[0];
+    if (!anchor) {
+      if (!anchors.value.length) throw new Error("没有取景关键帧，请先在面板创建");
+      throw new Error(`关键帧不存在，可用关键帧：${anchors.value.map(item => item.id).join("、")}`);
+    }
+    if (!nodeTypes?.value?.["remote-imageNode"]) throw new Error("请先启用图片节点插件");
+    if (exportingImage.value) throw new Error("图片正在导出，请等待完成");
+    void exportImage(anchor, args.aspect ?? 16 / 9, args.time ?? anchor.time ?? 0);
+    return { status: "exporting" };
+  },
+});
+
+nodeTools.register({
+  name: "getGenerationStatus",
+  description: "查询导演台状态：generating 为生成任务列表（id 在列表=进行中，带 error=失败，从列表消失=成功）；exportingVideo/exportProgress 与 exportingImage 为导出进度，复位且无 exportError 即导出完成；anchors 列出可导出的关键帧，plans 列出全部方案及当前选中项",
+  parameters: z.strictObject({}),
+  execute(_args, { signal }) {
+    signal?.throwIfAborted();
+    return {
+      generating: tasks.value,
+      exportingVideo: exportingVideo.value,
+      exportProgress: exportProgress.value,
+      exportingImage: exportingImage.value,
+      ...(exportError.value ? { exportError: exportError.value } : {}),
+      ...(modelLoading.value ? { modelLoading: true } : {}),
+      ...(modelError.value ? { modelError: modelError.value } : {}),
+      selectedPlan: selectedPlan.value ? { id: selectedPlan.value.id, name: selectedPlan.value.name, duration: selectedPlan.value.duration } : null,
+      plans: plans.value.map(({ id, name, duration }) => ({ id, name, duration })),
+      anchors: anchors.value.map(({ id, time }) => ({ id, time })),
+    };
+  },
+});
+
 </script>
 
 <style scoped lang="scss">

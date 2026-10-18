@@ -257,7 +257,7 @@ async function loadScene() {
   try {
     await nextTick();
     if (disposed || version !== loadVersion || !canvas.value) return;
-    const next = await createStage(canvas.value, scene, updateFrame, sceneAspect.value, lighting.value, sceneSettings.value);
+    const next = await createStage(canvas.value, scene, updateFrame, sceneAspect.value, lighting.value, sceneSettings.value, 1280);
     if (disposed || version !== loadVersion) return disposeStage(next);
     runtime = next;
     loadedScene = scene;
@@ -412,7 +412,7 @@ function formatTime(value: number) {
 function updateAspect() {
   if (!runtime) return;
   const aspect = sceneAspect.value;
-  runtime.renderer.setSize(Math.round(960 * Math.min(1, aspect)), Math.round(960 / Math.max(1, aspect)), false);
+  runtime.renderer.setSize(Math.round(1280 * Math.min(1, aspect)), Math.round(1280 / Math.max(1, aspect)), false);
   runtime.camera.aspect = aspect;
   runtime.camera.updateProjectionMatrix();
   focalLength.value = runtime.camera.getFocalLength();

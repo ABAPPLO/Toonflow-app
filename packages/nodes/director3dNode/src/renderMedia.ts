@@ -4,7 +4,7 @@ import { prepareSceneAnimation, type DirectorPlan } from "./sceneAnimation";
 
 export async function renderImage(scene: SceneDocument, anchor: CameraAnchor, aspect: number, time: number, signal: AbortSignal, plan?: DirectorPlan, lighting?: LightingSettings, settings?: SceneSettings) {
   signal.throwIfAborted();
-  const runtime = await createStage(document.createElement("canvas"), scene, undefined, aspect, lighting, settings);
+  const runtime = await createStage(document.createElement("canvas"), scene, undefined, aspect, lighting, settings, 1920);
   let player: ReturnType<typeof prepareSceneAnimation> | undefined;
   try {
     signal.throwIfAborted();
@@ -24,7 +24,7 @@ export async function renderVideo(scene: SceneDocument, plan: DirectorPlan, aspe
   const mimeType = typeof MediaRecorder !== "undefined" && ["video/mp4;codecs=avc1.420028", "video/mp4"].find(type => MediaRecorder.isTypeSupported(type));
   if (!mimeType) throw new Error("当前浏览器不支持 MP4 导出，请更新浏览器或桌面 WebView2 运行时");
   if (document.hidden) throw new Error("请在当前窗口保持可见时导出视频");
-  const runtime = await createStage(document.createElement("canvas"), scene, undefined, aspect, lighting, settings);
+  const runtime = await createStage(document.createElement("canvas"), scene, undefined, aspect, lighting, settings, 1920);
   let player: ReturnType<typeof prepareSceneAnimation> | undefined;
   let stream: MediaStream | undefined;
   let recorder: MediaRecorder | undefined;
@@ -43,7 +43,7 @@ export async function renderVideo(scene: SceneDocument, plan: DirectorPlan, aspe
     }
     draw(0);
     stream = runtime.renderer.domElement.captureStream(30);
-    recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 6_000_000 });
+    recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 12_000_000 });
     await new Promise<void>((resolve, reject) => {
       let failure: unknown;
       let size = 0;
