@@ -198,7 +198,7 @@ nodeEvent.on("save", async (reason) => {
   }
 });
 
-async function exportToCanvas(kind: "image" | "video", key: string, aspect: number, render: (signal: AbortSignal) => Promise<File>) {
+async function exportToCanvas(kind: "image" | "video", key: string, aspect: number, render: (signal: AbortSignal) => Promise<File>, label = selectedPlan.value?.name ?? "视频") {
   if (kind === "video" ? exportingVideo.value : exportingImage.value) return;
   const type = `remote-${kind}Node`;
   if (!nodeTypes?.value?.[type]) return void ElMessage.error(`请先启用${kind === "image" ? "图片" : "视频"}节点插件`);
@@ -228,7 +228,7 @@ async function exportToCanvas(kind: "image" | "video", key: string, aspect: numb
   try {
     workspaceFiles = files.getWorkspaceFiles();
     if (kind === "video") {
-      exportNode = addExportNode(selectedPlan.value?.name ?? "视频");
+      exportNode = addExportNode(label);
       // ACT: 导出进度只在当前运行中使用，不能写入画布或复制到另一个节点。
       Object.defineProperty(exportNode.data, "exportProgress", { value: 0, writable: true, configurable: true });
       stopWatching = watch([() => findNode(id), exportProgress], ([current, progress]) => {
@@ -271,19 +271,25 @@ async function exportToCanvas(kind: "image" | "video", key: string, aspect: numb
   }
 }
 
-function exportVideo(aspect: number) {
-  const plan = selectedPlan.value;
+function exportVideo(aspect: number, plan = selectedPlan.value) {
   if (!plan) return;
-  return exportToCanvas("video", "video", aspect, signal => renderVideo(scene.value, plan, aspect, signal, value => { exportProgress.value = value; }, lighting.value, sceneSettings.value));
+  return exportToCanvas("video", "video", aspect, signal => renderVideo(scene.value, plan, aspect, signal, value => { exportProgress.value = value; }, lighting.value, sceneSettings.value), plan.name);
 }
 
-function exportImage(anchor: CameraAnchor | undefined, aspect: number, time: number) {
+function exportImage(anchor: CameraAnchor | undefined, aspect: number, time: number, plan = selectedPlan.value) {
   const name = (anchor
     ? `关键帧${anchors.value.findIndex(item => item.id === anchor.id) + 1}`
-    : `${selectedPlan.value?.name ?? "画面"}-${time.toFixed(1)}s`).replace(/[\\/:*?"<>|]/g, "-");
+    : `${plan?.name ?? "画面"}-${time.toFixed(1)}s`).replace(/[\\/:*?"<>|]/g, "-");
   return exportToCanvas("image", anchor?.id ?? `time-${time}`, aspect, async signal => {
-    const file = await renderImage(scene.value, anchor, aspect, time, signal, selectedPlan.value, lighting.value, sceneSettings.value);
+    const file = await renderImage(scene.value, anchor, aspect, time, signal, plan, lighting.value, sceneSettings.value);
     return new File([file], `${name}.png`, { type: file.type });
+  });
+}
+
+function waitModelsLoaded() {
+  if (!modelsLoading.value) return Promise.resolve();
+  return new Promise<void>(resolve => {
+    const stop = watch(modelsLoading, value => { if (!value) { stop(); resolve(); } });
   });
 }
 
@@ -295,8 +301,13 @@ async function loadModels() {
     if (disposed) return;
     models.value = available;
     const first = models.value[0];
-    // ACT: 只给空配置选默认模型，保留暂时不可用的旧选择。
-    if (!model.value) model.value = first ? JSON.stringify([first.providerId, first.modelId]) : "";
+    // 供应商配置变化后旧选择可能不在当前列表，回退默认模型，避免生成与导出被卡住。
+    if (model.value && !models.value.some(item => JSON.stringify([item.providerId, item.modelId]) === model.value)) {
+      if (!disposed) ElMessage.warning("之前选择的生成模型已不可用，已切换为默认模型，请按需重选");
+      model.value = first ? JSON.stringify([first.providerId, first.modelId]) : "";
+    } else if (!model.value) {
+      model.value = first ? JSON.stringify([first.providerId, first.modelId]) : "";
+    }
   } catch (error) {
     if (!disposed) ElMessage.error(error instanceof Error ? error.message : "模型加载失败");
   } finally {
@@ -414,14 +425,19 @@ async function generate(requirement = prompt.value.trim()) {
 
 nodeTools.register({
   name: "generate",
-  description: "按当前或传入的指令生成导演台动画方案，等价于点击面板的“生成方案”按钮。instruction 缺省时使用节点输入框当前提示词，两者均为空、模型未就绪或首次创建基础模型期间已有进行中任务时报错；生成会清空节点输入框。立即返回 generating，任务 id 留在 getGenerationStatus 的 generating 列表表示进行中，带 error 表示失败，从列表消失表示成功",
+  description: "按当前或传入的指令生成导演台动画方案，等价于点击面板的“生成方案”按钮。instruction 缺省时使用节点输入框当前提示词，两者均为空、模型未配置或首次创建基础模型期间已有进行中任务时报错；生成会清空节点输入框。立即返回 generating，任务 id 留在 getGenerationStatus 的 generating 列表表示进行中，带 error 表示失败，从列表消失表示成功",
   parameters: z.strictObject({ instruction: z.string().max(4000).optional() }),
-  execute(args, { signal }) {
+  async execute(args, { signal }) {
     signal?.throwIfAborted();
     if (modelLoading.value) throw new Error("模型文件加载中，请稍后再生成");
     if (modelError.value) throw new Error(`模型文件加载失败：${modelError.value}`);
     if (addingMannequin.value) throw new Error("正在添加人偶，请稍后再生成");
-    if (!selectedModel.value) throw new Error("未选择生成模型，请先在面板选择模型");
+    if (modelsLoading.value) await waitModelsLoaded();
+    if (!models.value.length) {
+      void loadModels();
+      await waitModelsLoaded();
+    }
+    if (!selectedModel.value) throw new Error(models.value.length ? "之前选择的生成模型不在当前可用列表，请重新选择" : "可用生成模型为空，请先在设置中配置模型供应商");
     const requirement = (args.instruction ?? prompt.value).trim();
     if (!requirement) throw new Error("instruction 与节点输入框提示词均为空");
     if (!scene.value.objectList.length && tasks.value.some(task => !task.error)) throw new Error("首次创建基础模型期间只接收一个生成任务，请等待完成");
@@ -432,28 +448,42 @@ nodeTools.register({
 
 nodeTools.register({
   name: "exportVideo",
-  description: "把当前选中的动画方案离线逐帧编码为 MP4 并在画布旁生成视频节点，等价于点击“导出视频节点”按钮。本地渲染不调用媒体模型，页面保持打开即可、可在后台标签；总耗时约等于帧数乘单帧渲染耗时，与动画时长无关。仅在不支持离线编码的旧浏览器回退为实时录制时才要求窗口保持可见。立即返回 exporting，用 getGenerationStatus 查询 exportProgress 与完成状态",
-  parameters: z.strictObject({ aspect: z.number().positive().max(4).optional() }),
+  description: "把动画方案离线逐帧编码为 MP4 并在画布旁生成视频节点，等价于点击“导出视频节点”按钮。planId 缺省导出当前选中方案，可用 id 见 getGenerationStatus 返回的 plans，指定时不改变面板当前选中。本地渲染不调用媒体模型，页面保持打开即可、可在后台标签；总耗时约等于帧数乘单帧渲染耗时，与动画时长无关。立即返回 exporting，用 getGenerationStatus 查询 exportProgress 与完成状态",
+  parameters: z.strictObject({
+    planId: z.string().min(1).max(100).optional(),
+    aspect: z.number().positive().max(4).optional(),
+  }),
   execute(args, { signal }) {
     signal?.throwIfAborted();
-    if (!selectedPlan.value) throw new Error("没有选中的动画方案，请先生成或选中方案");
+    const plan = args.planId ? plans.value.find(item => item.id === args.planId) : selectedPlan.value;
+    if (!plan) {
+      if (!plans.value.length) throw new Error("没有任何动画方案，请先生成");
+      if (args.planId) throw new Error(`方案不存在，可用方案：${plans.value.map(item => item.id).join("、")}`);
+      throw new Error("没有选中的动画方案，可传 planId 指定或先生成、选中方案");
+    }
     if (!nodeTypes?.value?.["remote-videoNode"]) throw new Error("请先启用视频节点插件");
     if (exportingVideo.value) throw new Error("视频正在导出，请等待完成");
-    void exportVideo(args.aspect ?? 16 / 9);
+    void exportVideo(args.aspect ?? 16 / 9, plan);
     return { status: "exporting" };
   },
 });
 
 nodeTools.register({
   name: "exportImage",
-  description: "渲染指定画面为 PNG 并在画布旁生成图片节点，等价于点击关键帧上的导出按钮。anchorId 缺省导出第一个取景关键帧；没有关键帧时不报错，按 time（方案时间轴上的秒数，默认 0）用选中方案的运镜画面导出。可用关键帧见 getGenerationStatus 返回的 anchors。立即返回 exporting，用 getGenerationStatus 查询完成状态",
+  description: "渲染指定画面为 PNG 并在画布旁生成图片节点，等价于点击关键帧上的导出按钮。anchorId 缺省导出第一个取景关键帧；没有关键帧时不报错，按 time（方案时间轴上的秒数，默认 0）用方案运镜画面导出。planId 缺省用当前选中方案，可用 id 见 getGenerationStatus 返回的 plans，指定时不改变面板当前选中。立即返回 exporting，用 getGenerationStatus 查询完成状态",
   parameters: z.strictObject({
+    planId: z.string().min(1).max(100).optional(),
     anchorId: z.string().min(1).max(100).optional(),
     aspect: z.number().positive().max(4).optional(),
     time: z.number().min(0).max(300).optional(),
   }),
   execute(args, { signal }) {
     signal?.throwIfAborted();
+    const plan = args.planId ? plans.value.find(item => item.id === args.planId) : selectedPlan.value;
+    if (args.planId && !plan) {
+      if (!plans.value.length) throw new Error("没有任何动画方案，请先生成");
+      throw new Error(`方案不存在，可用方案：${plans.value.map(item => item.id).join("、")}`);
+    }
     const anchor = args.anchorId ? anchors.value.find(item => item.id === args.anchorId) : anchors.value[0];
     if (args.anchorId && !anchor) {
       if (!anchors.value.length) throw new Error("没有取景关键帧，可省略 anchorId 按 time 导出方案画面");
@@ -461,7 +491,7 @@ nodeTools.register({
     }
     if (!nodeTypes?.value?.["remote-imageNode"]) throw new Error("请先启用图片节点插件");
     if (exportingImage.value) throw new Error("图片正在导出，请等待完成");
-    void exportImage(anchor, args.aspect ?? 16 / 9, args.time ?? anchor?.time ?? 0);
+    void exportImage(anchor, args.aspect ?? 16 / 9, args.time ?? anchor?.time ?? 0, plan);
     return { status: "exporting" };
   },
 });
